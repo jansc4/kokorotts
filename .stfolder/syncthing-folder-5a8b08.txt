@@ -1,0 +1,5 @@
+# This directory is a Syncthing folder marker.
+# Do not delete.
+
+folderID: dyiye-mga7l
+created: 2026-07-07T13:30:20+02:00

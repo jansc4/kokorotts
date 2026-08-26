@@ -1,0 +1,14 @@
+services:
+  kokoro-tts:
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
+    container_name: kokoro-tts
+    restart: unless-stopped
+    ports:
+      - "8880:8880"
+    # Odkomentuj, jeśli chcesz trzymać cache modeli/voice packów poza kontenerem
+    # (przyspiesza kolejne starty, bo nie trzeba pobierać ponownie):
+    # volumes:
+    #   - kokoro-cache:/root/.cache
+
+# volumes:
+#   kokoro-cache:

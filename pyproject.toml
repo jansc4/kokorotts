@@ -1,0 +1,27 @@
+[project]
+name = "kokorotts"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "pywebview>=6.2.1",
+    "spacy>=3.6.0",
+    "click>=8.0",
+    "requests>=2.34.0",
+    "pdfplumber>=0.9.0",
+    "python-docx>=0.9.0",
+    "ebooklib>=0.18.0",
+    "beautifulsoup4>=4.13.0",
+    "qtpy>=2.4.3",
+    "pyqt6>=6.11.0",
+    "pyqt6-webengine>=6.11.0",
+    "en-core-web-sm",
+    "odfpy>=1.4.1",
+    "striprtf>=0.0.32",
+    "mobi>=0.4.1",
+    "fast-sentence-segment>=1.8.3",
+]
+
+[tool.uv.sources]
+en-core-web-sm = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }

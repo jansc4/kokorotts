@@ -1,0 +1,20 @@
+[
+  {
+    "pattern": "Qi",
+    "replacement": "chi",
+    "flags": 0,
+    "enabled": true
+  },
+  {
+    "pattern": "Lvl",
+    "replacement": "level",
+    "flags": 0,
+    "enabled": true
+  },
+  {
+    "pattern": "???",
+    "replacement": "unknown",
+    "flags": 0,
+    "enabled": false
+  }
+]

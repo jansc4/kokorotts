@@ -1,0 +1,5 @@
+{
+  "gap_paragraph_ms": 250,
+  "gap_scene_ms": 900,
+  "max_chunk_chars": 350
+}

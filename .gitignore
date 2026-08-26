@@ -1,0 +1,17 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Reference copy of Kokoro-FastAPI's own web UI, pulled down for study while
+# building this app - not this project's code, not for the public repo.
+demo/
+
+# Local test export (may contain TTS of whatever text was used to test with)
+kokorotts-export.mp3
