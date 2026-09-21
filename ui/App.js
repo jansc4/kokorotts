@@ -4,6 +4,7 @@ import { TtsQueue } from './TtsQueue.js';
 import { SentenceQueue } from './SentenceQueue.js';
 import { showRulesPopup } from './RulesPopup.js';
 import { showIntervalsPopup } from './IntervalsPopup.js';
+import { showFindReplacePopup } from './FindReplacePopup.js';
 
 
 window.addEventListener("pywebviewready", () => {
@@ -31,6 +32,7 @@ window.addEventListener("pywebviewready", () => {
     const openFileName = document.getElementById('open-file-name');
     const textInput = document.getElementById('text-input');
     const clearBtn = document.getElementById('clear-btn');
+    const findReplaceBtn = document.getElementById('find-replace-btn');
     const rulesBtn = document.getElementById('rules-btn');
     const intervalsBtn = document.getElementById('intervals-btn');
     const genProgress = document.getElementById('gen-progress');
@@ -67,6 +69,10 @@ window.addEventListener("pywebviewready", () => {
     clearBtn.addEventListener('click', () => {
         textInput.value = '';
         openFileName.textContent = '';
+    });
+
+    findReplaceBtn.addEventListener('click', () => {
+        showFindReplacePopup(textInput);
     });
 
     rulesBtn.addEventListener('click', () => {

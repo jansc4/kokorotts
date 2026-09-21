@@ -496,3 +496,42 @@ body {
     }
     .panel--input, .panel--controls { min-height: 200px; }
 }
+
+/* Find & Replace popup */
+.popup--small { width: min(400px, 90vw); }
+
+.find-replace {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.find-replace__field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.find-replace__field span {
+    font-size: 12px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.find-replace__field input[type="text"] {
+    background: var(--bg-void);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 6px 8px;
+    width: 100%;
+}
+.find-replace__check {
+    font-size: 12px;
+    color: var(--text-dim);
+}
+.find-replace__count {
+    font-size: 11px;
+    color: var(--text-dim);
+    min-height: 1em;
+}

@@ -1,12 +1,12 @@
 // Wspolny, minimalny modal - uzywany przez RulesPopup.js i IntervalsPopup.js.
-export function openPopup({ title, bodyElement, onSave, saveLabel = 'Zapisz' }) {
+export function openPopup({ title, bodyElement, onSave, saveLabel = 'Zapisz', className = '' }) {
     const root = document.getElementById('popup-root');
 
     const overlay = document.createElement('div');
     overlay.className = 'popup-overlay';
 
     const popup = document.createElement('div');
-    popup.className = 'popup';
+    popup.className = className ? `popup ${className}` : 'popup';
 
     const header = document.createElement('div');
     header.className = 'popup__header';
