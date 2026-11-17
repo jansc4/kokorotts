@@ -41,6 +41,10 @@ export class TtsQueue {
                 continue;
             }
 
+            if (data.truncated) {
+                console.warn(`Zdanie ${i}: timestampy urwane przez Kokoro (tekst w stderr Pythona)`);
+            }
+
             this.queue.chunks[i] = data;
             this.queue.generatedCount++;
 
