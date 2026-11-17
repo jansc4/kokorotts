@@ -10,8 +10,9 @@ Model chunk/gap (zastepuje plaska liste zdan):
 
 Trzy warstwy:
   1. struktura       - linie -> bloki prozy | gap sceny | gap akapitu
-  2. segmentacja+DFA - fast_sentence_segment tnie proze na zdania; DFA
-     cudzyslowow flaguje zdania padajace WEWNATRZ mowy (potrzebne scalaniu)
+  2. segmentacja+DFA - fast_sentence_segment wyznacza GRANICE zdan (tekst
+     zawsze z oryginalu); DFA cudzyslowow zapisuje per zdanie, czy jego
+     poczatek lezy wewnatrz otwartej mowy (potrzebne scalaniu)
   3. scalanie        - zdania -> chunki (nie lam tury mowy; limit dlugosci)
 
 Interwaly (dlugosci gapow, limit chunka) czytane z intervals.json przez main.py
@@ -43,39 +44,60 @@ class Segment:
 
 
 # --- znaki ---
-OPEN_Q, CLOSE_Q, STRAIGHT_Q = "\u201C", "\u201D", '"'
-_SEP_CHARS = set("*-\u2013\u2014_\u00b7=~ \t")   # * - en-dash em-dash _ middot = ~
+OPEN_Q, CLOSE_Q, STRAIGHT_Q = "“", "”", '"'
+OPEN_SQ, CLOSE_SQ = "‘", "’"
+_QUOTE_CHARS = set("\"'“”‘’")
 _HAS_LETTER = re.compile(r"[^\W\d_]")            # przynajmniej jedna litera
+_HAS_CONTENT = re.compile(r"[^\W_]")             # litera ALBO cyfra ("100." zostaje)
 
-# fss dokleja kropke po zdaniu konczacym sie cudzyslowem zamykajacym
-# ('impressive."' -> 'impressive.".'). Usuwamy JA TYLKO gdy wewnatrz cudzyslowu
-# jest juz interpunkcja konca zdania - nie tykamy legalnego brytyjskiego "yes".
-_ADDED_PERIOD = re.compile("([.!?][\u201D\u2019\"'])\\.\\Z")
+# normalizacja linii (sciezka textarea omija reader._clean): spacje/taby/nbsp -> 1 spacja,
+# znaki zero-width out. Podwojna spacja psula granice fss ("The  End" -> "The." | "End.")
+_WS = re.compile("[ \t\u00a0\u202f]+")
+_ZERO_WIDTH = re.compile("[\u200b\u200c\u200d\ufeff]")
+
+# emfaza markdown (*sigh*, _word_) rozbija fss ("*sigh" | "* Chapter"); kokoro i tak
+# gwiazdek nie czyta -> odwijamy przed segmentacja
+_EMPH_STAR = re.compile(r"\*+([^*\n]+)\*+")
+_EMPH_UNDER = re.compile(r"(?<!\w)_([^_\n]+)_(?!\w)")
+
+# separatory sceny zapisane litera: oOo / o0o / x x x
+_SEP_WORD = re.compile(r"^(?:o[o0]o|x\s*x\s*x)$", re.IGNORECASE)
 
 
-def _strip_added_period(s: str) -> str:
-    return _ADDED_PERIOD.sub(r"\1", s.strip())
-
-
-# Kokoro (/dev/captioned_speech) URYWA strumien timestampow na en-dashu i na
-# zwyklym mysliku OTOCZONYCH SPACJAMI (" - ", " - "). Audio powstaje z calego
+# Kokoro (/dev/captioned_speech) URYWA strumien timestampow na mysliku OTOCZONYM
+# SPACJAMI: " - ", " -- ", " - ", " ‒ ", " ― ", " − ". Audio powstaje z calego
 # chunka (slychac je), ale timestampy koncza sie w tym miejscu -> reszta chunka
 # znika z kolejki i z highlightu. Em-dash jest bezpieczny (zweryfikowane
 # empirycznie: em ze spacjami i bez, en bez spacji - wszystkie OK).
 # Podmiana jest tez semantycznie poprawna: wtracenie w angielskiej prozie to em-dash.
 # UWAGA: to niezmiennik pipeline'u (timestampy musza pokrywac caly chunk),
 # dlatego siedzi tutaj, a nie w rules.json - nie ma byc wylaczalne z popupu.
-_SPACED_DASH = re.compile(r"\s+[-\u2013]\s+")
+# Stosowane do GOTOWEGO tekstu chunka (flush), bo laczenie zdan spacja potrafi
+# odtworzyc " - " ("going to -" + "- Hello"). Ciag kilku myslnikow -> jeden em-dash.
+_DASH = r"(?:-{1,3}|[‒–―−])"
+_SPACED_DASH = re.compile(r"\s+" + _DASH + r"(?:\s+" + _DASH + r")*\s+")
+_TRAILING_DASH = re.compile(r"\s+" + _DASH + r"\Z")
 
 
 def _fix_spaced_dashes(s: str) -> str:
-    return _SPACED_DASH.sub("\u2014", s)
+    return _TRAILING_DASH.sub("—", _SPACED_DASH.sub("—", s))
 
 
 def _is_separator_line(line: str) -> bool:
-    """Linia zlozona WYLACZNIE ze znakow separatora (np. ***, * * *, ---, en-dash sam)."""
+    """Linia-separator sceny: krotka, bez liter i cyfr (***, * * *, ---, ###, • • •,
+    ⁂, ◆, ..., ⸻, en-dash sam) albo oOo / x x x. Linia z samym cudzyslowem
+    ("“…”" - milczaca odpowiedz w dialogu) NIE jest separatorem."""
     s = line.strip()
-    return bool(s) and all(ch in _SEP_CHARS for ch in s)
+    if not s:
+        return False
+    if _SEP_WORD.match(s):
+        return True
+    return (len(s) <= 40 and not _HAS_CONTENT.search(s)
+            and not (set(s) & _QUOTE_CHARS))
+
+
+def _normalize_line(line: str) -> str:
+    return _ZERO_WIDTH.sub("", _WS.sub(" ", line)).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -103,9 +125,9 @@ def _structure(raw: str, iv: dict) -> list:
         return Segment("gap", duration_ms=iv["gap_paragraph_ms"], gap_type="paragraph")
 
     for line in raw.split("\n"):
-        stripped = line.strip()
+        stripped = _normalize_line(line)
 
-        if not stripped or _is_separator_line(line):
+        if not stripped or _is_separator_line(stripped):
             blank_run += 1
             if stripped:                 # niepusta linia-separator (np. ***, en-dash)
                 run_has_sep = True
@@ -130,44 +152,96 @@ def _structure(raw: str, iv: dict) -> list:
 # ---------------------------------------------------------------------------
 
 def _detect_quote_style(text: str) -> str:
-    """'typographic' gdy kierunkowe, 'straight' gdy tylko proste, 'none' gdy brak."""
+    """'typographic' (“”), 'straight' ("), 'single' (‘’ bez podwojnych), 'none'."""
     if OPEN_Q in text or CLOSE_Q in text:
         return "typographic"
     if STRAIGHT_Q in text:
         return "straight"
+    if OPEN_SQ in text:
+        return "single"
     return "none"
 
 
-def _split_and_tag(block_text: str) -> list:
-    """fss tnie akapit na zdania; DFA cudzyslowow flaguje in_speech.
-    Zwraca [(zdanie, in_speech), ...]."""
-    # fss.segment zwraca akapity (lista list); blok = jeden akapit -> splaszcz
-    sentences = [s for para in fss.segment(block_text) for s in para]
-    sentences = [_fix_spaced_dashes(_strip_added_period(s))
-                 for s in sentences if _HAS_LETTER.search(s)]
+def _sentences(block: str) -> list:
+    """fss TYLKO do granic. fss modyfikuje tekst (dokleja kropki: 'acquired!].',
+    'silence.', '‘How are you?’.'; potrafi tez kropke zjesc), wiec bierzemy
+    z fss jedynie pozycje POCZATKU zdania w oryginale i tniemy oryginal miedzy nimi.
+    Zaden znak nie jest dodany ani zgubiony."""
+    starts = [0]
+    cursor = 0
+    for s in (s for para in fss.segment(block) for s in para):
+        s = s.strip()
+        # fss psuje tylko KONIEC zdania (dopisana/zjedzona kropka) -> sonda go pomija
+        probe = s[:min(12, len(s) - 1)] if len(s) > 1 else s
+        if not probe:
+            continue
+        pos = block.find(probe, cursor)
+        if pos < 0:                      # fss zmienil poczatek -> brak granicy, zlej z poprzednim
+            continue
+        if pos > starts[-1]:
+            starts.append(pos)
+        # przeskocz cialo zdania (z zapasem na znaki dodane/usuniete przez fss),
+        # zeby probe nastepnego zdania nie trafila wewnatrz biezacego
+        cursor = pos + max(len(probe), len(s) - 3)
+    ends = starts[1:] + [len(block)]
+    return [p for p in (block[a:b].strip() for a, b in zip(starts, ends)) if p]
 
-    style = _detect_quote_style(block_text)
+
+def _glue_lowercase(sents: list) -> list:
+    """Atrybucja dialogu: fss tnie '“Is that so…?” he asked.' na dwa zdania.
+    Zdanie, ktorego pierwsza litera jest mala, doklejamy do poprzedniego -
+    inaczej scalanie chetnie tnie dokladnie w tym miejscu."""
+    out: list = []
+    for s in sents:
+        m = _HAS_LETTER.search(s)
+        if out and m and m.group().islower():
+            out[-1] = out[-1] + " " + s
+        else:
+            out.append(s)
+    return out
+
+
+def _split_and_tag(block_text: str) -> list:
+    """Akapit -> [(zdanie, starts_inside, in_speech), ...].
+
+    starts_inside = stan DFA na pierwszym znaku zdania (wewnatrz otwartego
+                    cudzyslowu?). Ciecie PRZED zdaniem jest bezpieczne iff False -
+                    zdanie otwierajace nowa kwestie to dobra granica.
+    in_speech     = zdanie dotyka mowy (tylko dla UI).
+    DFA idzie po WSZYSTKICH zdaniach; filtr zdan bez tresci dopiero potem,
+    zeby wyrzucony fragment z cudzyslowem nie przestawil parzystosci."""
+    block = _EMPH_UNDER.sub(r"\1", _EMPH_STAR.sub(r"\1", block_text))
+    sentences = _glue_lowercase(_sentences(block))
+
+    style = _detect_quote_style(block)
     inside = False               # stan wejsciowy w akapit: poza mowa
     tagged: list = []
 
     for sent in sentences:
-        saw_speech = inside      # zdanie zaczyna sie wewnatrz mowy?
-        for ch in sent:
+        starts_inside = inside
+        saw_speech = inside
+        for i, ch in enumerate(sent):
             if style == "typographic":
                 if ch == OPEN_Q:
-                    inside = True
-                    saw_speech = True
+                    inside = saw_speech = True
                 elif ch == CLOSE_Q:
                     inside = False
             elif style == "straight":
-                if ch == STRAIGHT_Q:
+                # " tuz po cyfrze to cal (6" wide), nie cudzyslow
+                if ch == STRAIGHT_Q and not (i and sent[i - 1].isdigit()):
                     inside = not inside
-                    if inside:
-                        saw_speech = True
+                    saw_speech = saw_speech or inside
+            elif style == "single":
+                # ’ przed litera to apostrof (didn’t), nie zamkniecie
+                if ch == OPEN_SQ:
+                    inside = saw_speech = True
+                elif ch == CLOSE_SQ and not (i + 1 < len(sent) and sent[i + 1].isalpha()):
+                    inside = False
             # style == 'none' -> stan bez zmian
-        tagged.append((sent, saw_speech))
+        tagged.append((sent, starts_inside, saw_speech))
 
-    return tagged
+    # kokoro zwraca 500 na wejsciu bez liter i cyfr ("***", '"')
+    return [t for t in tagged if _HAS_CONTENT.search(t[0])]
 
 
 # ---------------------------------------------------------------------------
@@ -175,33 +249,36 @@ def _split_and_tag(block_text: str) -> list:
 # ---------------------------------------------------------------------------
 
 def _merge(tagged: list, max_chars: int) -> list:
-    """Zdania -> chunki. R1: nie lam tury mowy (przy podziale preferuj granice
-    poza mowa). R3: twardy limit dlugosci. Tura dluzsza niz limit -> wymuszony podzial."""
+    """Zdania -> chunki. R1: nie lam tury mowy (tnij tylko przed zdaniem, ktore
+    nie zaczyna sie wewnatrz cudzyslowu). R3: limit dlugosci - po kazdym cieciu
+    sprawdzany ponownie. Brak bezpiecznej granicy -> wymuszony podzial.
+    Chunk przekracza limit tylko gdy jest pojedynczym zdaniem."""
     chunks: list = []
-    buf: list = []   # [(tekst, in_speech), ...]
+    buf: list = []   # [(tekst, starts_inside, in_speech), ...]
 
     def joined(items):
-        return " ".join(t for t, _ in items)
+        return " ".join(t for t, _, _ in items)
 
     def flush(items):
         if items:
-            chunks.append(Segment("chunk", text=joined(items),
-                                   in_speech=any(s for _, s in items)))
+            chunks.append(Segment("chunk", text=_fix_spaced_dashes(joined(items)),
+                                  in_speech=any(s for _, _, s in items)))
 
-    for sent, spk in tagged:
-        if buf and len(joined(buf)) + 1 + len(sent) > max_chars:
-            # trzeba lamac: ostatnia granica gdzie NASTEPNE zdanie NIE jest w mowie
-            cut = None
-            for i in range(1, len(buf)):
-                if not buf[i][1]:
-                    cut = i
-            if cut is not None:            # R1: lam poza mowa
-                flush(buf[:cut])
-                buf = buf[cut:]
-            else:                          # brak bezpiecznej granicy -> wymuszony podzial
+    for item in tagged:
+        while buf and len(joined(buf)) + 1 + len(item[0]) > max_chars:
+            if not item[1]:                # granica przed nowym zdaniem jest bezpieczna
                 flush(buf)
                 buf = []
-        buf.append((sent, spk))
+                break
+            # ostatnia bezpieczna granica wewnatrz bufora
+            cut = next((i for i in range(len(buf) - 1, 0, -1) if not buf[i][1]), None)
+            if cut is None:                # brak bezpiecznej granicy -> wymuszony podzial
+                flush(buf)
+                buf = []
+                break
+            flush(buf[:cut])               # R1: lam poza mowa, potem sprawdz limit znowu
+            buf = buf[cut:]
+        buf.append(item)
 
     flush(buf)
     return chunks
