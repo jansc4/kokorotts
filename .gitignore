@@ -15,3 +15,12 @@ demo/
 
 # Local test export (may contain TTS of whatever text was used to test with)
 kokorotts-export.mp3
+# Unfinished export (export_audio writes <path>.part, then renames)
+*.part
+
+# Throwaway diagnostic scripts (_diag_*.py convention) and core dumps
+_diag_*.py
+core.[0-9]*
+
+# Syncthing folder marker
+.stfolder/

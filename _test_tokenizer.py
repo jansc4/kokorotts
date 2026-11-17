@@ -145,3 +145,4 @@ for i, s in enumerate(segs):
         print(f"[{i:02d}] CHUNK len={L}{flag}{warn}")
         print(f"     {s['text']}")
 print(f"\nRAZEM: {len(segs)} segmentow, {sum(1 for s in segs if s['kind']=='chunk')} chunkow, {sum(1 for s in segs if s['kind']=='gap')} gapow")
+sys.exit(1 if FAILS else 0)
