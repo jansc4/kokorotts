@@ -84,8 +84,8 @@ class Api():
         #   {index, audio, timestamps, ...[, truncated]}  sukces
         #   {index, error}                                 blad (HTTP, timeout, zla odpowiedz, regula)
         #   {index, stale}                                 wynik anulowanej generacji (inna epoka)
-        # Normalizacja PRZED syntezą - do Kokoro leci tekst po regulach.
-        # (Karta zdania w JS pokazuje dzis tokeny Kokoro, nie oryginal - patrz audyt H1.)
+        # Normalizacja PRZED syntezą - do Kokoro leci tekst po regulach; karta
+        # w JS pokazuje oryginal, a WordHighlighter nakłada na niego tokeny Kokoro.
         if epoch is not None and epoch != self.epoch:
             return {"index": index, "stale": True}
         try:

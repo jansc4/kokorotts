@@ -174,7 +174,7 @@ window.addEventListener("pywebviewready", () => {
         player.state = 'PLAYING';
         audioService.start(i, t);
         highlighter.setAudioElement(audioService.element);
-        highlighter.setTimestamps(sentenceData[i].timestamps, sentenceQueue.getTextElement(i));
+        highlighter.setTimestamps(sentenceData[i].timestamps, sentenceQueue.getTextElement(i), allSentences[i]);
         sentenceQueue.markActive(i);
         preloadNext();
     }
