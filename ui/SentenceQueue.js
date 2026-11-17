@@ -1,16 +1,20 @@
-// Zarzadza DOM-em panelu "03 - Queue". Kazda karta ma jeden z 4 stanow:
+// Zarzadza DOM-em panelu "03 - Queue". Kazda karta ma jeden z 5 stanow:
 // pending    - jeszcze nie wygenerowana (nieklikalna)
 // generated  - audio gotowe, czeka w kolejce na odtworzenie
 // active     - wlasnie czytane (podswietlone slowo jest w tym zdaniu)
 // played     - juz przeczytane
-// Wszystkie oprocz pending sa klikalne -> onSentenceClick(index) (skok/seek).
+// failed     - generacja nieudana (po ponowce), pomijana przy odtwarzaniu (nieklikalna)
+// generated/active/played sa klikalne -> onSentenceClick(index) (skok/seek).
 
 const STATE_CLASS = {
     pending: 'sentence--pending',
     generated: 'sentence--generated',
     active: 'sentence--active',
     played: 'sentence--played',
+    failed: 'sentence--failed',
 };
+
+const FIXED = new Set(['pending', 'failed']); // stany, ktorych markActive nie przestawia
 
 export class SentenceQueue {
     constructor(containerElement) {
@@ -31,7 +35,7 @@ export class SentenceQueue {
             const article = document.createElement('article');
             article.addEventListener('click', () => {
                 const card = this.cards[i];
-                if (card.state !== 'pending') {
+                if (!FIXED.has(card.state)) {
                     this.onSentenceClick?.(i);
                 }
             });
@@ -64,6 +68,14 @@ export class SentenceQueue {
         if (card && card.state === 'pending') this._setState(card, 'generated');
     }
 
+    // Generacja chunka nieudana (TtsQueue.onFailed).
+    markFailed(index, error) {
+        const card = this.cards[index];
+        if (!card) return;
+        this._setState(card, 'failed');
+        card.article.title = `Nie wygenerowano: ${error}`;
+    }
+
     // Wolane przy kazdej aktywacji zdania (sekwencyjnie po 'ended' albo po
     // kliknieciu/skoku). Kazda karta INNA niz nowy indeks dostaje jednoznaczny
     // stan na podstawie pozycji - niezaleznie co mial WCZESNIEJ (w tym stare
@@ -72,8 +84,8 @@ export class SentenceQueue {
         this.cards.forEach((card, i) => {
             if (i === index) {
                 this._setState(card, 'active');
-            } else if (card.state === 'pending') {
-                // jeszcze nie wygenerowane - nie ma czego przestawiac
+            } else if (FIXED.has(card.state)) {
+                // niewygenerowane / nieudane - nie ma czego przestawiac
             } else if (i < index) {
                 this._setState(card, 'played');
             } else {
@@ -86,6 +98,7 @@ export class SentenceQueue {
     }
 
     _setState(card, state) {
+        if (card.state === state) return;   // M4: markActive chodzi po wszystkich kartach
         card.state = state;
         card.article.className = `sentence ${STATE_CLASS[state]}`;
     }

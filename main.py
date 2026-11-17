@@ -252,9 +252,13 @@ class Api():
         # Bez tego eksport sklejal zdania bez przerw miedzy akapitami/scenami.
         part = None
         try:
+            # chunki nieudane/niewygenerowane (S4, Cancel) sa pomijane, ich gapy zostaja
+            if not any(i in self.sentence_audio_cache for i in range(count)):
+                return {"error": "Brak wygenerowanego audio do eksportu"}
             missing = [i for i in range(count) if i not in self.sentence_audio_cache]
             if missing:
-                return {"error": f"Brak w cache audio dla zdan: {missing}"}
+                print(f"[export] pomijam {len(missing)} chunkow bez audio: {missing[:20]}",
+                      file=sys.stderr)
 
             result = self.window.create_file_dialog(
                 webview.FileDialog.SAVE,
@@ -283,7 +287,8 @@ class Api():
         # Bajty pobierane leniwie (_part_bytes) - zadnego b"".join calej ksiazki.
         items = []
         for i in range(count):
-            items.append(("c", i))
+            if i in self.sentence_audio_cache:
+                items.append(("c", i))
             gap_ms = int(gaps[i]) if i < len(gaps) and gaps[i] else 0
             if gap_ms > 0 and self._silence_mp3(gap_ms):
                 items.append(("s", gap_ms))

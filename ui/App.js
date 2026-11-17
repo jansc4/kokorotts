@@ -109,29 +109,185 @@ window.addEventListener("pywebviewready", () => {
         speedValue.textContent = `${parseFloat(speedRange.value).toFixed(1)}×`;
     });
 
+    const api = window.pywebview.api;
+    const statusEl = document.getElementById('status');
+
+    function setStatus(text) {
+        statusEl.textContent = text;
+    }
+
+    // --- dane biezacej ksiazki (rownolegle tablice po indeksie chunka) ---
+    let allSentences = [];      // teksty chunkow (z foldGaps)
+    let sentenceGaps = [];      // pauza (ms) PO kazdym chunku (z gapa za nim)
+    let sentenceData = [];      // { timestamps } - audio zyje tylko w AudioService (M2)
+    let sentenceDurations = []; // end_time ostatniego slowa = "slowna" dlugosc chunka
+    let totalDuration = 0;      // gapy + suma durations, liczona przyrostowo (M3)
+    let okCount = 0;
+    let failedCount = 0;
     let ttsQueue = null;
-    let isGenerating = false;  // czy generacja TRWA (a nie tylko: czy istnieje kolejka)
-
-    // Pelny, trwaly cache kazdego wygenerowanego zdania (audio+timestamps) -
-    // potrzebny zeby klikniecie w DOWOLNA juz wygenerowana karte (rowniez
-    // cofniecie) moglo je odtworzyc bez ponownego zapytania do API.
-    let sentenceData = [];
-    let allSentences = [];     // teksty chunkow (z foldGaps) - rownolegle do sentenceData
-    let sentenceGaps = [];     // pauza (ms) po kazdym chunku (z gapa za nim); rownolegla do sentenceData
-    let activeIndex = -1;      // ktore zdanie aktualnie gra (-1 = jeszcze nic)
-    let standbyIndex = null;   // ktore zdanie jest zaladowane w standby (albo null)
-    let awaitingPlayback = false; // true = jak tylko cos wpadnie do standby, aktywuj od razu
-
-    // Pasek postepu calej ksiazki. sentenceDurations to ZYWA ESTYMACJA z
-    // end_time transkryptu (aktualizowana w miare generowania) - po
-    // zakonczeniu generacji korygowana na PRAWDZIWY, zmierzony czas trwania
-    // (finalDuration) przez AudioService.measureDuration na sklejonym blobie.
-    let sentenceDurations = [];
-    let finalDuration = null;
-    let totalDurationEstimate = 0;
-    let combinedBlobForExport = null;
+    let genRun = 0;             // id przebiegu Generate; osierocony przebieg po await wychodzi (S3)
+    let exporting = false;
     let isSeekingProgress = false;
     let progressInterval = null;
+
+    // ------------------------------------------------------------------
+    // PLAYER - jedyne zrodlo prawdy o odtwarzaniu. Kazda zmiana idzie przez
+    // dispatch(); przycisk Play/Generate/Export renderowane ze stanu (render).
+    //   IDLE     nic nie gralo (autoplay off)      PAUSED    zatrzymane przez usera
+    //   PLAYING  gra element <audio>               GAP       pauza miedzy chunkami (timer)
+    //   WAITING  chce nastepny chunk, jeszcze nie ma   FINISHED  koniec ksiazki
+    // ------------------------------------------------------------------
+    const player = {
+        state: 'IDLE',
+        active: -1,             // aktywny chunk - JEDYNE miejsce, gdzie ten indeks zyje
+        pendingAdvance: false,  // pauza w GAP/WAITING: Play ma isc dalej, nie wznawiac starego
+        gapTimer: null,
+        epoch: 0,               // ++ na nowa ksiazke; timer z poprzedniej jest ignorowany
+        status: [],             // per chunk: 'pending' | 'ok' | 'failed'
+        gen: 'idle',            // generacja: 'idle' | 'tokenizing' | 'running'
+    };
+
+    const isRunningState = (s) => s === 'PLAYING' || s === 'GAP' || s === 'WAITING';
+
+    function clearGap() {
+        if (player.gapTimer !== null) clearTimeout(player.gapTimer);
+        player.gapTimer = null;
+    }
+
+    // pierwszy chunk za aktywnym, ktory nie jest 'failed' (albo -1)
+    function nextIndex() {
+        for (let i = player.active + 1; i < player.status.length; i++) {
+            if (player.status[i] !== 'failed') return i;
+        }
+        return -1;
+    }
+
+    function preloadNext() {
+        const n = nextIndex();
+        if (n !== -1 && player.status[n] === 'ok') audioService.preload(n);
+    }
+
+    function start(i, t = 0) {
+        clearGap();
+        player.pendingAdvance = false;
+        player.active = i;
+        player.state = 'PLAYING';
+        audioService.start(i, t);
+        highlighter.setAudioElement(audioService.element);
+        highlighter.setTimestamps(sentenceData[i].timestamps, sentenceQueue.getTextElement(i));
+        sentenceQueue.markActive(i);
+        preloadNext();
+    }
+
+    // Nastepny chunk: gotowy -> PLAYING, jeszcze sie generuje -> WAITING,
+    // nic juz nie przyjdzie (koniec, Cancel, same bledy) -> FINISHED (S7).
+    function advance() {
+        clearGap();
+        player.pendingAdvance = false;
+        const n = nextIndex();
+        if (n !== -1 && player.status[n] === 'ok') start(n);
+        else if (n !== -1 && player.gen !== 'idle') player.state = 'WAITING';
+        else player.state = 'FINISHED';
+    }
+
+    function dispatch(ev) {
+        const p = player;
+        switch (ev.type) {
+        case 'NEW_GENERATION': {                    // { count, autoplay }
+            p.epoch++;
+            clearGap();
+            p.pendingAdvance = false;
+            p.active = -1;
+            p.status = new Array(ev.count).fill('pending');
+            // autoplay = "czekam na pierwszy chunk"; advance() wystartuje go sam
+            p.state = ev.autoplay ? 'WAITING' : 'IDLE';
+            break;
+        }
+        case 'CHUNK_READY':                         // { index }
+        case 'CHUNK_FAILED':                        // { index }
+            p.status[ev.index] = ev.type === 'CHUNK_READY' ? 'ok' : 'failed';
+            if (p.state === 'WAITING') advance();   // nieudany zostanie przeskoczony
+            else if (p.state !== 'IDLE' && p.state !== 'FINISHED') preloadNext();
+            break;
+        case 'GENERATION_END':                      // koniec albo Cancel
+            p.gen = 'idle';
+            if (p.state === 'WAITING') advance();   // nic wiecej nie przyjdzie
+            break;
+        case 'PLAY':
+            if (p.status.length === 0) break;
+            if (p.state === 'PAUSED') {
+                if (p.pendingAdvance) {
+                    advance();
+                } else {
+                    audioService.resume();
+                    p.state = 'PLAYING';
+                }
+            } else if (p.state === 'IDLE') {
+                advance();
+            } else if (p.state === 'FINISHED') {
+                p.active = -1;                      // od poczatku
+                advance();
+            }
+            break;
+        case 'PAUSE':
+            if (p.state === 'PLAYING') {
+                audioService.pause();
+            } else if (p.state === 'GAP' || p.state === 'WAITING') {
+                clearGap();                         // element juz 'ended' - nie wolno go wznawiac (S2)
+                p.pendingAdvance = true;
+            } else {
+                break;
+            }
+            p.state = 'PAUSED';
+            break;
+        case 'ENDED': {
+            if (p.state !== 'PLAYING') break;
+            const gap = sentenceGaps[p.active] || 0;
+            if (gap > 0) {
+                const epoch = p.epoch;
+                p.state = 'GAP';
+                p.gapTimer = setTimeout(() => dispatch({ type: 'GAP_ELAPSED', epoch }), gap);
+            } else {
+                advance();
+            }
+            break;
+        }
+        case 'GAP_ELAPSED':                         // { epoch }
+            p.gapTimer = null;
+            if (ev.epoch === p.epoch && p.state === 'GAP') advance();
+            break;
+        case 'JUMP':                                // { index, time } - klik karty albo seek
+            if (p.status[ev.index] === 'ok') start(ev.index, ev.time || 0);  // czysci timer (S1)
+            break;
+        }
+        render();
+    }
+
+    function render() {
+        const playing = isRunningState(player.state);
+        playBtn.innerHTML = playing
+            ? '<span class="btn__icon">❚❚</span> Pause'
+            : '<span class="btn__icon">▸</span> Play';
+
+        const busy = player.gen !== 'idle';
+        generateBtn.classList.toggle('btn--cancel', busy);
+        generateBtn.classList.toggle('btn--primary', !busy);
+        generateBtn.innerHTML = busy
+            ? 'Cancel <span class="btn__arrow">✕</span>'
+            : 'Generate <span class="btn__arrow">▸</span>';
+
+        // eksport po zakonczeniu/anulowaniu generacji; Python pomija nieudane chunki
+        exportBtn.disabled = exporting || busy || okCount === 0;
+
+        // M5: pasek odtwarzania odswiezany tylko gdy cos gra
+        if (playing && !progressInterval) {
+            progressInterval = setInterval(refreshProgressUI, 200);
+        } else if (!playing && progressInterval) {
+            clearInterval(progressInterval);
+            progressInterval = null;
+        }
+        refreshProgressUI();
+    }
 
     function formatTime(seconds) {
         if (!isFinite(seconds) || seconds < 0) seconds = 0;
@@ -141,15 +297,16 @@ window.addEventListener("pywebviewready", () => {
     }
 
     function currentPositionSeconds() {
+        const a = player.active;
         let position = 0;
-        for (let i = 0; i < activeIndex; i++) {
+        for (let i = 0; i < a; i++) {
             position += (sentenceDurations[i] || 0) + (sentenceGaps[i] || 0) / 1000;
         }
-        if (activeIndex >= 0) {
+        if (a >= 0) {
             // Zegar audio biegnie tez przez cisze PO ostatnim slowie chunka;
             // przycinamy do dlugosci "slownej" (end_time), zeby pozycja nie
             // przekroczyla totalu (ktory tez jest liczony z end_time + gapy).
-            const activeDur = sentenceDurations[activeIndex] || 0;
+            const activeDur = sentenceDurations[a] || 0;
             position += activeDur
                 ? Math.min(audioService.element.currentTime, activeDur)
                 : audioService.element.currentTime;
@@ -158,12 +315,9 @@ window.addEventListener("pywebviewready", () => {
     }
 
     function refreshProgressUI() {
-        // Total i pozycja licza sie z TEGO SAMEGO zrodla: suma end_time slow
-        // + gapy (totalDurationEstimate). Pomiar sklejonego MP3 (finalDuration)
-        // bywa krotszy niz suma czesci -> powodowal overshoot suwaka. Nie uzywany.
-        const total = totalDurationEstimate;
-        progressRange.max = total > 0 ? total : 1;
-        timeTotal.textContent = formatTime(total);
+        // Total i pozycja z TEGO SAMEGO zrodla: suma end_time slow + gapy.
+        progressRange.max = totalDuration > 0 ? totalDuration : 1;
+        timeTotal.textContent = formatTime(totalDuration);
 
         if (!isSeekingProgress) {
             const position = currentPositionSeconds();
@@ -182,244 +336,181 @@ window.addEventListener("pywebviewready", () => {
         isSeekingProgress = false;
     });
 
-    // Zamienia "sekunda w calej ksiazce" na "ktore zdanie + offset w nim".
+    // "sekunda w calej ksiazce" -> ktory chunk + offset w nim. Offset przyciety
+    // do slownej dlugosci chunka - seek w gap nie wychodzi poza audio (S9).
     function seekToSeconds(targetSeconds) {
         let remaining = targetSeconds;
-        for (let i = 0; i < sentenceDurations.length; i++) {
-            const dur = (sentenceDurations[i] || 0) + (sentenceGaps[i] || 0) / 1000;
-            if (remaining <= dur || i === sentenceDurations.length - 1) {
-                jumpToSentence(i, Math.max(0, remaining));
+        const last = sentenceDurations.length - 1;
+        for (let i = 0; i <= last; i++) {
+            const words = sentenceDurations[i] || 0;
+            const dur = words + (sentenceGaps[i] || 0) / 1000;
+            if (player.status[i] === 'ok' && (remaining <= dur || i === last)) {
+                dispatch({ type: 'JUMP', index: i, time: Math.min(Math.max(0, remaining), words) });
                 return;
             }
             remaining -= dur;
         }
     }
 
-    // <a download> na blob URL nie dziala w QtWebEngine bez recznego podpiecia
-    // downloadRequested po stronie hosta - wiec zamiast tego Python otwiera
-    // PRAWDZIWY, natywny dialog zapisu.
-    //
-    // Audio KAZDEGO zdania Python juz ma w sentence_audio_cache (zcache'owane
-    // w generate_sentence) - eksport tylko podaje LICZBE zdan, a sklejanie
-    // dzieje sie po stronie Pythona. Wczesniej cala ksiazka (Blob sklejony w
-    // JS) leciala jako jeden base64 string przez most JS<->Python
-    // (QWebChannel) - dla duzych plikow ten most zawodzil i dawal plik 0B.
+    // <a download> na blob URL nie dziala w QtWebEngine - Python otwiera natywny
+    // dialog i skleja audio z wlasnego cache (nic duzego nie idzie przez most).
     exportBtn.addEventListener('click', async () => {
-        if (!combinedBlobForExport) return;
-
-        exportBtn.disabled = true;
+        if (exportBtn.disabled) return;
+        exporting = true;
+        render();
         const originalLabel = exportBtn.innerHTML;
         exportBtn.textContent = 'Zapisywanie…';
 
         try {
-            const result = await window.pywebview.api.export_audio(allSentences.length, sentenceGaps);
+            const result = await api.export_audio(allSentences.length, sentenceGaps);
             if (result && result.error) {
                 console.error('Eksport nie powiódł się:', result.error);
+                setStatus(`Eksport nie powiódł się: ${result.error}`);
+            } else if (result) {
+                const skipped = allSentences.length - okCount;
+                setStatus(skipped ? `Zapisano (pominięto ${skipped} fragm.): ${result}` : `Zapisano: ${result}`);
             }
+        } catch (e) {
+            setStatus(`Eksport nie powiódł się: ${e}`);
         } finally {
-            exportBtn.disabled = false;
+            exporting = false;
             exportBtn.innerHTML = originalLabel;
+            render();
         }
     });
 
-    function setGenerateButtonState(generating) {
-        generateBtn.classList.toggle('btn--cancel', generating);
-        generateBtn.classList.toggle('btn--primary', !generating);
-        generateBtn.innerHTML = generating
-            ? 'Cancel <span class="btn__arrow">✕</span>'
-            : 'Generate <span class="btn__arrow">▸</span>';
-    }
-
-    function setPlayButtonState(playing) {
-        playBtn.innerHTML = playing
-            ? '<span class="btn__icon">❚❚</span> Pause'
-            : '<span class="btn__icon">▸</span> Play';
-    }
-
-    // Sprawdza czy standby jest puste i czy kolejne zdanie (activeIndex + 1)
-    // jest juz wygenerowane - jesli tak, laduje je. Wolane po kazdym nowym
-    // chunku ORAZ po kazdej aktywacji (bo wtedy zwalnia sie standby).
-    function tryFillStandby() {
-        if (standbyIndex !== null) return;
-        const nextIndex = activeIndex + 1;
-        const data = sentenceData[nextIndex];
-        if (!data) return;
-
-        audioService.loadStandby(nextIndex, data.audio);
-        standbyIndex = nextIndex;
-
-        if (awaitingPlayback) {
-            activateStandby();
-        }
-    }
-
-    function activateStandby() {
-        if (standbyIndex === null) {
-            awaitingPlayback = true; // nic gotowego - czekaj na najblizszy przychodzacy chunk
-            setPlayButtonState(false); // audio realnie stoi w miejscu - przycisk ma to odzwierciedlac
-            return;
-        }
-        awaitingPlayback = false;
-
-        const index = standbyIndex;
-        standbyIndex = null;
-        activeIndex = index;
-
-        audioService.swap();
-        highlighter.setAudioElement(audioService.element);
-        highlighter.setTimestamps(sentenceData[index].timestamps, sentenceQueue.getTextElement(index));
-        sentenceQueue.markActive(index);
-        setPlayButtonState(true);
-
-        tryFillStandby();
-    }
-
-    // Klik w karte zdania (dowolne juz wygenerowane, w tym cofniecie), albo
-    // seek z paska postepu (wtedy startTime = sekunda WEWNATRZ tego zdania).
-    function jumpToSentence(index, startTime = 0) {
-        const data = sentenceData[index];
-        if (!data) return;
-
-        audioService.jumpTo(index, data.audio, startTime);
-        activeIndex = index;
-        standbyIndex = null;
-        awaitingPlayback = false;
-
-        highlighter.setAudioElement(audioService.element);
-        highlighter.setTimestamps(data.timestamps, sentenceQueue.getTextElement(index));
-        sentenceQueue.markActive(index);
-        setPlayButtonState(true);
-
-        tryFillStandby(); // sprobuj od razu podladowac kolejne po skoku
-    }
-
-    // Pauza PO zdaniu ktore wlasnie sie skonczylo, wg jego znaku konczacego -
-    // dotyczy TYLKO naturalnego przejscia (ended), nie skoku/klikniecia karty.
-    audioService.onEnded = () => {
-        // Pauza = gap NASTEPUJACY po chunku ktory wlasnie sie skonczyl.
-        // Dotyczy tylko naturalnego przejscia (ended), nie skoku/klikniecia karty.
-        const delay = sentenceGaps[activeIndex] || 0;
-        if (delay > 0) {
-            setTimeout(() => activateStandby(), delay);
-        } else {
-            activateStandby();
-        }
-    };
-    sentenceQueue.onSentenceClick = (index) => jumpToSentence(index);
+    audioService.onEnded = () => dispatch({ type: 'ENDED' });
+    sentenceQueue.onSentenceClick = (index) => dispatch({ type: 'JUMP', index });
 
     playBtn.addEventListener('click', () => {
-        if (audioService.element.paused) {
-            if (audioService.element.src) {
-                audioService.play();
-                setPlayButtonState(true);
-            } else {
-                // nic jeszcze nie gralo - to pierwszy klik Play przy wylaczonym autoplay
-                activateStandby();
-            }
-        } else {
-            audioService.pause();
-            setPlayButtonState(false);
-        }
+        dispatch({ type: isRunningState(player.state) ? 'PAUSE' : 'PLAY' });
     });
 
-    window.pywebview.api.check_tts_service().then((result) => {
-        if (!result) {
-            console.log("TTS service is not running.");
-            document.getElementById("status").textContent = "TTS service is not running.";
+    async function loadVoices() {
+        const voices = await api.get_voices();
+        if (!voices || voices.length === 0) {
+            voiceSelect.innerHTML = '<option>brak głosów</option>';
+            return;
+        }
+        voiceSelect.innerHTML = voices.map(v => `<option value="${v}">${v}</option>`).join('');
+        voiceSelect.disabled = false;
+        if (voices.includes('am_adam')) {
+            voiceSelect.value = 'am_adam';
+        }
+    }
+
+    // Health sprawdzany przy starcie ORAZ przy kazdym Generate - Kokoro moze
+    // wstac pozniej niz aplikacja, bez restartu (S5).
+    async function checkService() {
+        let ok = false;
+        try {
+            ok = await api.check_tts_service();
+        } catch (e) {
+            ok = false;
+        }
+        setStatus(ok ? 'TTS service is running.' : 'TTS service is not running.');
+        if (ok && voiceSelect.disabled) await loadVoices();
+        return ok;
+    }
+
+    checkService();
+
+    generateBtn.addEventListener('click', async (e) => {
+        // 2. klik dwukliku (detail = 2) trafilby juz w "Cancel" - ignorujemy go,
+        // dwuklik = jeden przebieg. Swiadomy Cancel to osobne klikniecie.
+        if (e.detail > 1) return;
+        if (player.gen !== 'idle') {
+            // Cancel (w trakcie tokenizacji albo generacji). Juz wygenerowane
+            // chunki dalej graja; osierocony przebieg wyjdzie po najblizszym await.
+            genRun++;
+            ttsQueue?.clear();
+            dispatch({ type: 'GENERATION_END' });
             return;
         }
 
-        console.log("TTS service is running.");
-        document.getElementById("status").textContent = "TTS service is running.";
+        const run = ++genRun;
+        const stale = () => run !== genRun;
+        player.gen = 'tokenizing';      // synchronicznie, przed pierwszym await (S3)
+        render();
 
-        window.pywebview.api.get_voices().then((voices) => {
-            if (!voices || voices.length === 0) {
-                voiceSelect.innerHTML = '<option>brak głosów</option>';
+        try {
+            if (!(await checkService())) {
+                if (!stale()) dispatch({ type: 'GENERATION_END' });
                 return;
             }
-            voiceSelect.innerHTML = voices.map(v => `<option value="${v}">${v}</option>`).join('');
-            voiceSelect.disabled = false;
-            if (voices.includes('am_adam')) {
-                voiceSelect.value = 'am_adam';
-            }
-        });
+            if (stale()) return;
 
-        generateBtn.addEventListener('click', async () => {
-            if (isGenerating) {
-                // Klik W TRAKCIE generacji = Cancel. Po zakonczeniu generacji
-                // isGenerating jest false, wiec kolejny klik startuje nowa
-                // generacje (a nie "anuluje" skonczona kolejke - stary bug).
-                ttsQueue?.clear();
-                isGenerating = false;
-                setGenerateButtonState(false);
-                return;
-            }
-
-            const text = document.getElementById('text-input').value;
-            const segments = await window.pywebview.api.tokenize_text(text);
+            const segments = await api.tokenize_text(textInput.value);
+            if (stale()) return;
             const { texts: sentences, gapAfter } = foldGaps(segments);
-            sentenceGaps = gapAfter;
+            if (sentences.length === 0) {
+                setStatus('Brak tekstu do przeczytania.');
+                dispatch({ type: 'GENERATION_END' });
+                return;
+            }
 
+            // --- nowa ksiazka ---
+            allSentences = sentences;
+            sentenceGaps = gapAfter;
+            sentenceData = [];
+            sentenceDurations = [];
+            totalDuration = gapAfter.reduce((sum, g) => sum + (g || 0) / 1000, 0);
+            okCount = 0;
+            failedCount = 0;
             audioService.reset();
-            window.pywebview.api.reset_generation_cache(); // czysci sentence_audio_cache w Pythonie (patrz export_audio)
             highlighter.setAudioElement(audioService.element);
             highlighter.start(); // petla RAF zyje przez cala sesje, patrz WordHighlighter
             sentenceQueue.render(sentences);
-            setPlayButtonState(false);
-
-            sentenceData = [];
-            allSentences = sentences;
-            activeIndex = -1;
-            standbyIndex = null;
-            awaitingPlayback = autoplayCheck.checked; // aktywuj natychmiast po pierwszym chunku
-
-            sentenceDurations = [];
-            finalDuration = null;
-            totalDurationEstimate = 0;
-            combinedBlobForExport = null;
-            exportBtn.disabled = true;
-            refreshProgressUI();
             updateGenProgress(0, sentences.length);
+            dispatch({ type: 'NEW_GENERATION', count: sentences.length, autoplay: autoplayCheck.checked });
 
-            if (progressInterval) clearInterval(progressInterval);
-            progressInterval = setInterval(refreshProgressUI, 200);
+            // P4: Python musi znac nowa epoke ZANIM poleci pierwszy generate
+            await api.reset_generation_cache(run);
+            if (stale()) return;
 
-            ttsQueue = new TtsQueue(sentences);
-            isGenerating = true;
-            setGenerateButtonState(true);
+            player.gen = 'running';
+            render();
+            const queue = new TtsQueue(sentences);
+            ttsQueue = queue;
 
-            await ttsQueue.generateAll(window.pywebview.api, (data, index) => {
-                sentenceData[index] = data;
-                audioService.cacheBlob(index, data.audio);
-
-                const lastWord = data.timestamps[data.timestamps.length - 1];
-                sentenceDurations[index] = lastWord ? lastWord.end_time : 0;
-                totalDurationEstimate = sentenceDurations.reduce((sum, d) => sum + (d || 0), 0)
-                    + sentenceGaps.reduce((sum, g) => sum + (g || 0) / 1000, 0);
-
-                sentenceQueue.markGenerated(index);
-                tryFillStandby();
-                refreshProgressUI();
-                updateGenProgress(sentenceData.filter(Boolean).length, sentences.length);
+            await queue.generateAll(api, {
+                onReady: (data, i) => {
+                    if (stale()) return;
+                    audioService.cacheBlob(i, data.audio);
+                    sentenceData[i] = { timestamps: data.timestamps }; // base64 nie zostaje w JS (M2)
+                    const lastWord = data.timestamps[data.timestamps.length - 1];
+                    sentenceDurations[i] = lastWord ? lastWord.end_time : 0;
+                    totalDuration += sentenceDurations[i];
+                    okCount++;
+                    sentenceQueue.markGenerated(i);
+                    updateGenProgress(okCount + failedCount, sentences.length);
+                    dispatch({ type: 'CHUNK_READY', index: i });
+                },
+                onFailed: (i, error) => {
+                    if (stale()) return;
+                    failedCount++;
+                    sentenceQueue.markFailed(i, error);
+                    setStatus(`Nie wygenerowano ${failedCount} fragm. (oznaczone na czerwono).`);
+                    updateGenProgress(okCount + failedCount, sentences.length);
+                    dispatch({ type: 'CHUNK_FAILED', index: i });
+                },
             }, {
                 voice: voiceSelect.value,
                 speed: parseFloat(speedRange.value),
+                epoch: run,
             });
 
-            isGenerating = false;
-            setGenerateButtonState(false);
-
-            // Generacja skonczona (nie anulowana) - sklej wszystko RAZ, zmierz
-            // prawdziwy czas trwania i odblokuj eksport.
-            if (!ttsQueue.cancelled) {
-                const combined = audioService.getCombinedBlob(sentences.length);
-                if (combined) {
-                    combinedBlobForExport = combined;
-                    finalDuration = await audioService.measureDuration(combined);
-                    exportBtn.disabled = false;
-                    refreshProgressUI();
-                }
+            if (stale()) return;
+            dispatch({ type: 'GENERATION_END' });
+        } catch (e) {
+            console.error('Generate:', e);
+            if (!stale()) {
+                setStatus(`Błąd generacji: ${e}`);
+                ttsQueue?.clear();
+                dispatch({ type: 'GENERATION_END' });
             }
-        });
+        }
     });
+
+    render();
 });

@@ -479,6 +479,15 @@ body {
 
 .sentence--pending .sentence__text { color: var(--text-dim); }
 
+.sentence--failed {
+    cursor: default;
+    border-left-color: var(--accent-red);
+    opacity: 0.6;
+}
+.sentence--failed .sentence__index { color: var(--accent-red); }
+.sentence--failed .sentence__text { color: var(--text-dim); text-decoration: line-through; }
+.sentence--failed:hover { border-color: var(--border); }
+
 /* Word highlight (konsumowane przez WordHighlighter.js) */
 .sentence__text span {
     color: inherit;
