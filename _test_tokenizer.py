@@ -101,6 +101,19 @@ s = TK.tokenize_structured("First.\n“…”\nSecond.")
 check("T9 linia '“…”' to nie scena",
       [x["gap_type"] for x in s if x["kind"] == "gap"] == ["paragraph"], s)
 
+# --- T10: tekst lamany twardo ---
+src = "This is a long sentence that was\nhard wrapped by the source file\nat eighty columns."
+c = chunks(src)
+check("T10 zawijany -> jeden akapit", c == [src.replace("\n", " ")], c)
+src = ("An exam-\nple of wrap-\nping text that\ngoes on and on.\n\n"
+       "Second para that\nis also wrapped\nhere, yes.")
+s = TK.tokenize_structured(src)
+got = [x["text"] or x["gap_type"] for x in s]
+check("T10 przeniesienia + bloki", got == ["An example of wrapping text that goes on and on.",
+      "paragraph", "Second para that is also wrapped here, yes."], got)
+s = TK.tokenize_structured("Chapter 3\n“Hi.”\n“Bye.”\nHe left.")
+check("T10 zwykly tekst bez zmian", sum(x["kind"] == "chunk" for x in s) == 4, s)
+
 print(f"\n{'WSZYSTKO OK' if not FAILS else f'BLEDY: {len(FAILS)}'}\n")
 
 EX = """That Thalion had no patron caused quite different reactions. Cassandra burst out laughing. Most of the gods simply shrugged it off\u2014they didn't really care. But Solan\u2026 Solan was one step away from exploding.

@@ -100,6 +100,37 @@ def _normalize_line(line: str) -> str:
     return _ZERO_WIDTH.sub("", _WS.sub(" ", line)).strip()
 
 
+# T10: tekst lamany twardo (pdfplumber extract_text, .txt zawijane na 80 kol.).
+# Jesli WIEKSZOSC linii tresci nie konczy sie znakiem konca zdania/cytatu,
+# uznajemy tekst za zawijany i sklejamy kolejne linie w obrebie bloku
+# (bloki rozdzielaja puste linie i separatory). 'exam-\nple' -> 'example'.
+_LINE_END = re.compile("[.!?…:\"”’)\\]]$")
+_HYPHEN_WRAP = re.compile(r"[^\W\d_]-$")
+
+
+def _unwrap_lines(raw: str) -> str:
+    lines = [_normalize_line(l) for l in raw.split("\n")]
+    content = [l for l in lines if l and not _is_separator_line(l)]
+    unended = sum(1 for l in content if not _LINE_END.search(l))
+    if unended * 2 <= len(content):          # zwykly tekst: linia = akapit
+        return raw
+    out: list = []
+    joinable = False
+    for l in lines:
+        if l and not _is_separator_line(l):
+            if joinable and _HYPHEN_WRAP.search(out[-1]) and l[:1].islower():
+                out[-1] = out[-1][:-1] + l       # przeniesienie wyrazu
+            elif joinable:
+                out[-1] = out[-1] + " " + l
+            else:
+                out.append(l)
+            joinable = True
+        else:
+            out.append(l)
+            joinable = False
+    return "\n".join(out)
+
+
 # ---------------------------------------------------------------------------
 # WARSTWA 1 - struktura (praca LINIAMI, nie zdaniami)
 # ---------------------------------------------------------------------------
@@ -318,7 +349,7 @@ class Tokenizer:
         iv = {**DEFAULT_INTERVALS, **(intervals or {})}
         segs: list = []
 
-        for item in _structure(text, iv):
+        for item in _structure(_unwrap_lines(text), iv):
             if isinstance(item, Segment):          # gap z warstwy 1
                 segs.append(item)
             else:                                  # ('prose', tekst_akapitu)
